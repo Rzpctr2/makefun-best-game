@@ -1,24 +1,31 @@
 // LUMEN DRIFT — game loop and state machine.
 // States: title → playing → (waveclear banner) → playing … → gameover
 // (or victory at wave 10) → title. Pause overlays playing.
-import { COLORS, PLAYER, STORAGE_KEY, VIEW, WAVE } from './config.js';
-import { Player, mulberry32 } from './entities.js';
-import { World, seededWorld } from './world.js';
+import { COLORS, PLAYER, STORAGE_KEY, SYNERGY, VIEW, WAVE } from './config.js';
+import { FloatText, Player, mulberry32 } from './entities.js';
+import { World, applyUpgrade, magnetRadiusFor, pick3 } from './world.js';
 import { bindInput, isDown, mouse, wasPressed, endFrame, axis } from './input.js';
-import { drawBackground, drawGameOver, drawHUD, drawPaused, drawTitle, drawWaveBanner, drawWorld, makeStars } from './render.js';
+import { drawBackground, drawGameOver, drawHUD, drawHurtVignette, drawPaused, drawTitle, drawUpgrade, drawWaveBanner, drawWorld, makeAsteroids, makeDust, makeStars, upgradeLayout } from './render.js';
 import { initAudio, sfx, startMusic, stopMusic, toggleMute } from './audio.js';
 import { buildShotScene } from './shots.js';
 
-export const STATES = { TITLE: 'title', PLAYING: 'playing', PAUSED: 'paused', OVER: 'over' };
+export const STATES = { TITLE: 'title', PLAYING: 'playing', PAUSED: 'paused', OVER: 'over', UPGRADE: 'upgrade' };
 
 export class Game {
-  constructor(canvas) {
+  constructor(canvas, seed = 7) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
-    this.rng = Math.random;
+    // Deterministic run: every wave composition, spawn position, drop and
+    // card draft comes from this seeded PRNG (mulberry32). The default
+    // seed is 7; ?seed=N replays a different run. No Math.random() or
+    // Date.now() anywhere in a gameplay path.
+    this.seed = seed;
+    this.rng = mulberry32(seed);
     this.stars = makeStars(this.rng);
+    this.dust = makeDust(this.rng);
+    this.asteroids = makeAsteroids(this.rng);
     this.player = new Player();
-    this.world = new World(this.rng);
+    this.world = new World(this.rng, seed);
     this.state = STATES.TITLE;
     this.time = 0;
     this.bannerTimer = 0;
@@ -27,6 +34,12 @@ export class Game {
     this.best = 0;
     try { this.best = Number(localStorage.getItem(STORAGE_KEY)) || 0; } catch (_) { /* storage unavailable */ }
     this.overTimer = 0;
+    this.upgradeChoices = [];
+    this.synergyFlash = null;
+    this.autoAim = false;
+    // When true the rAF loop draws but never steps the simulation:
+    // used for deterministic screenshot scenes and fixed-step tests.
+    this.stepMode = false;
     bindInput(canvas);
     // Debug/testing hook for headless playtests (read-only state + start).
     window.__LUMEN = {
@@ -36,12 +49,46 @@ export class Game {
       lives: () => this.player.lives,
       enemies: () => this.world.enemies.length,
       start: () => this.startRun(),
+      deflects: () => this.player.deflectCount,
+      upgrades: () => ({ ...this.player.upgrades }),
+      suits: () => ({ ...this.player.suits }),
+      upgradeChoices: () => this.upgradeChoices.map((c) => c.id),
+      choose: (i) => this.chooseUpgrade(i),
+      // Headless playtest assist: aim + autofire at the nearest enemy,
+      // and auto-pick the first draft card. Off in normal play.
+      autoAim: (on) => { this.autoAim = !!on; },
+      tick: (n) => { for (let i = 0; i < n; i++) this.update(1 / 60); },
+      // Freeze/resume the rAF simulation (drawing continues). Lets a
+      // test drive the game in fixed 1/60 steps via tick().
+      stepMode: (on) => { this.stepMode = !!on; },
+      // Full deterministic state digest: two runs with the same seed and
+      // the same tick count must produce byte-identical digests.
+      digest: () => {
+        const r4 = (v) => Math.round(v * 10000) / 10000;
+        const w = this.world, p = this.player;
+        return JSON.stringify({
+          state: this.state, time: r4(this.time),
+          score: w.score, wave: w.wave, kills: w.kills, combo: r4(w.combo),
+          lives: p.lives, maxLives: p.maxLives,
+          px: r4(p.x), py: r4(p.y), pvx: r4(p.vx), pvy: r4(p.vy), angle: r4(p.angle),
+          shieldAngle: r4(p.shieldAngle), shieldArcDeg: p.shieldArcDeg,
+          deflects: p.deflectCount, bombs: p.bombs,
+          upgrades: p.upgrades, suits: p.suits,
+          enemies: w.enemies.map((e) => [e.type, r4(e.x), r4(e.y), r4(e.vx), r4(e.vy), e.hp, e.phase]),
+          bullets: w.bullets.map((b) => [r4(b.x), r4(b.y), r4(b.vx), r4(b.vy), b.friendly, b.deflected, b.damage]),
+          pickups: w.pickups.map((k) => [k.kind, r4(k.x), r4(k.y)]),
+          spawnQueue: [...w.spawnQueue],
+          texts: w.texts.length, particles: w.particles.length,
+          waveActive: w.waveActive, bossHp: w.boss ? w.boss.hp : null,
+        });
+      },
     };
   }
 
   startRun() {
     initAudio();
     startMusic();
+    this.time = 0;
     this.player.reset();
     this.world.reset();
     this.state = STATES.PLAYING;
@@ -56,12 +103,43 @@ export class Game {
     this.world.score += bonus;
     this.world.texts.push({ x: VIEW.W / 2, y: 200, text: `WAVE BONUS +${bonus}`, color: '#facc15', life: 1.2, dead: false, update(dt) { this.y -= 30 * dt; this.life -= dt; if (this.life <= 0) this.dead = true; } });
     if (wave >= WAVE.winWave) { this.endRun(true); return; }
-    this.bannerWave = wave + 1;
+    // WARD synergy ×3: hull regenerates +1 every 2 waves.
+    if (this.player.suits.WARD >= 3) {
+      this.world.regenCounter++;
+      if (this.world.regenCounter >= 2 && this.player.lives < this.player.maxLives) {
+        this.player.lives++;
+        this.world.regenCounter = 0;
+        this.world.texts.push(new FloatText(this.player.x, this.player.y - 30, 'HULL +1', '#4ade80'));
+      }
+    }
+    // Card draft: pick 1 of 3 before the next wave (dungeon-crawler
+    // synergy transplanted to a wave draft).
+    this.upgradeChoices = pick3(this.player, this.world.rng);
+    this.state = STATES.UPGRADE;
+    sfx.upgrade();
+  }
+
+  chooseUpgrade(i) {
+    if (this.state !== STATES.UPGRADE) return false;
+    const card = this.upgradeChoices[i];
+    if (!card) return false;
+    const { synergy, level } = applyUpgrade(this.player, card);
+    if (synergy) {
+      this.synergyFlash = { text: `SYNERGY ${synergy} ×${level} — ${SYNERGY[synergy][level]}`, timer: 3.0 };
+      sfx.synergy();
+    } else {
+      sfx.powerup();
+    }
+    const next = this.world.wave + 1;
+    this.bannerWave = next;
     this.bannerTimer = 2.0;
-    this.world.startWave(wave + 1);
+    this.state = STATES.PLAYING;
+    this.world.startWave(next);
+    return true;
   }
 
   onPlayerHit() {
+    this.world.hurtFlash = 0.35;
     if (this.player.shield) {
       this.player.shield = false;
       this.player.invuln = 1.2;
@@ -84,7 +162,7 @@ export class Game {
     else if (kind === 'rapid') { p.rapidUntil = 12; sfx.powerup(); }
     else if (kind === 'shield') { p.shield = true; sfx.powerup(); }
     else if (kind === 'bomb') { p.bombs = Math.min(3, p.bombs + 1); sfx.powerup(); }
-    else if (kind === 'life') { p.lives = Math.min(PLAYER.maxLives, p.lives + 1); sfx.powerup(); }
+    else if (kind === 'life') { p.lives = Math.min(p.maxLives, p.lives + 1); sfx.powerup(); }
     else sfx.pickup();
   }
 
@@ -102,6 +180,10 @@ export class Game {
 
   update(dt) {
     this.time += dt;
+    if (this.synergyFlash) {
+      this.synergyFlash.timer -= dt;
+      if (this.synergyFlash.timer <= 0) this.synergyFlash = null;
+    }
     if (this.state === STATES.TITLE) {
       if (wasPressed('enter') || wasPressed('space') || wasPressed('mouse')) this.startRun();
       return;
@@ -114,6 +196,25 @@ export class Game {
     if (this.state === STATES.PAUSED) {
       if (wasPressed('p') || wasPressed('escape')) { this.state = STATES.PLAYING; sfx.click(); }
       if (wasPressed('r')) this.startRun();
+      return;
+    }
+    if (this.state === STATES.UPGRADE) {
+      // Card draft between waves. Click a card, or press 1 / 2 / 3.
+      if (wasPressed('1')) { this.chooseUpgrade(0); return; }
+      if (wasPressed('2')) { this.chooseUpgrade(1); return; }
+      if (wasPressed('3')) { this.chooseUpgrade(2); return; }
+      if (wasPressed('r')) { this.startRun(); return; }
+      if (wasPressed('mouse')) {
+        const rects = upgradeLayout();
+        for (let i = 0; i < rects.length; i++) {
+          const r = rects[i];
+          if (mouse.x >= r.x && mouse.x <= r.x + r.w && mouse.y >= r.y && mouse.y <= r.y + r.h) {
+            this.chooseUpgrade(i);
+            return;
+          }
+        }
+      }
+      if (this.autoAim) this.chooseUpgrade(0);
       return;
     }
     // PLAYING
@@ -136,9 +237,23 @@ export class Game {
     p.x += p.vx * dt; p.y += p.vy * dt;
     p.x = Math.max(20, Math.min(VIEW.W - 20, p.x));
     p.y = Math.max(20, Math.min(VIEW.H - 20, p.y));
+    // Headless playtest assist: aim + autofire at the nearest enemy.
+    if (this.autoAim && this.world.enemies.length > 0) {
+      let best = null; let bd = Infinity;
+      for (const e of this.world.enemies) {
+        const d = (e.x - p.x) ** 2 + (e.y - p.y) ** 2;
+        if (d < bd) { bd = d; best = e; }
+      }
+      if (best) { mouse.x = best.x; mouse.y = best.y; mouse.down = true; }
+    }
     p.aimX = mouse.x; p.aimY = mouse.y;
     p.angle = Math.atan2(mouse.y - p.y, mouse.x - p.x);
     p.thrust = Math.hypot(ax.x, ax.y) > 0 ? 1 : 0;
+    // The orbital shield rides on the aim: it guards where you look.
+    p.shieldAngle = p.angle;
+    // WARD synergy ×2: pickups magnetize from 2× range.
+    p.magnetRadius = magnetRadiusFor(p);
+
 
     // Dash.
     if (p.dashCd > 0) p.dashCd -= dt;
@@ -158,7 +273,8 @@ export class Game {
     p.fireTimer -= dt;
     const firing = mouse.down || isDown('space');
     if (firing && p.fireTimer <= 0) {
-      p.fireTimer = p.rapid ? PLAYER.fireRate * 0.55 : PLAYER.fireRate;
+      // STRIKE synergy ×2: fire rate +15%.
+      p.fireTimer = (p.rapid ? PLAYER.fireRate * 0.55 : PLAYER.fireRate) * (p.suits.STRIKE >= 2 ? 0.85 : 1);
       this.world.fireBullet(p, p.spread);
       sfx.shoot();
     }
@@ -170,17 +286,32 @@ export class Game {
     const ctx = this.ctx;
     ctx.save();
     ctx.clearRect(0, 0, VIEW.W, VIEW.H);
-    const sx = this.world.shake > 0 ? (Math.random() - 0.5) * this.world.shake : 0;
-    const sy = this.world.shake > 0 ? (Math.random() - 0.5) * this.world.shake : 0;
+    // Screen shake: deterministic pseudo-noise from game time, so two
+    // runs with the same tick count render the same frame.
+    const sx = this.world.shake > 0 ? Math.sin(this.time * 127.1) * this.world.shake * 0.5 : 0;
+    const sy = this.world.shake > 0 ? Math.cos(this.time * 149.3) * this.world.shake * 0.5 : 0;
     ctx.translate(sx, sy);
-    drawBackground(ctx, this.stars, this.time);
+    drawBackground(ctx, this.stars, this.time, this.dust, this.asteroids);
     if (this.state === STATES.TITLE) {
       drawTitle(ctx, this.best, this.time);
     } else {
       drawWorld(ctx, this.world, this.player);
+      if (this.world.hurtFlash > 0) drawHurtVignette(ctx, this.world.hurtFlash / 0.35);
       drawHUD(ctx, this.world, this.player, this.time);
       if (this.bannerTimer > 0) drawWaveBanner(ctx, this.bannerWave, 2.0 - this.bannerTimer);
+      if (this.synergyFlash) {
+        ctx.save();
+        ctx.globalAlpha = Math.min(1, this.synergyFlash.timer);
+        ctx.font = 'bold 20px monospace';
+        ctx.textAlign = 'center';
+        ctx.shadowColor = '#facc15';
+        ctx.shadowBlur = 16;
+        ctx.fillStyle = '#facc15';
+        ctx.fillText(this.synergyFlash.text, VIEW.W / 2, 120);
+        ctx.restore();
+      }
       if (this.state === STATES.PAUSED) drawPaused(ctx);
+      if (this.state === STATES.UPGRADE) drawUpgrade(ctx, this.upgradeChoices, this.player, this.world.wave);
       if (this.state === STATES.OVER) drawGameOver(ctx, this.world, this.best, this.isWin);
     }
     ctx.restore();
@@ -199,25 +330,25 @@ export function boot() {
   canvas.height = VIEW.H;
   const params = new URLSearchParams(window.location.search);
   const seed = Number(params.get('seed') || 7);
-  const game = new Game(canvas);
+  const game = new Game(canvas, seed);
   fitCanvas(canvas);
   window.addEventListener('resize', () => fitCanvas(canvas));
 
   const shot = params.get('shot');
   if (shot) {
-    // Deterministic screenshot scenes (see shots.js).
-    game.rng = mulberry32(seed);
-    game.stars = makeStars(game.rng);
-    game.world = seededWorld(seed);
-    game.world.rng = game.rng;
+    // Deterministic screenshot scenes (see shots.js). The two action
+    // stills (play/boss) are frozen so the staged frame is byte-identical
+    // on every capture; the menu stills (start/upgrade/end) stay live so
+    // their controls (click to launch, pick a card, R to restart) work.
     buildShotScene(game, shot, seed);
+    if (shot === 'play' || shot === 'boss') game.stepMode = true;
   }
 
   let last = performance.now();
   function loop(now) {
     const dt = Math.min(0.05, (now - last) / 1000 || 0.016);
     last = now;
-    game.update(dt);
+    if (!game.stepMode) game.update(dt);
     game.draw();
     endFrame();
     requestAnimationFrame(loop);

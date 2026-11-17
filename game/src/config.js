@@ -78,3 +78,63 @@ export const PICKUPS = {
 };
 
 export const STORAGE_KEY = 'lumendrift.best';
+
+// ── BASTION orbital shield (Gibran's own mechanic, ported to vanilla JS) ──
+// A glowing arc orbits the ship at SHIELD.radius and follows the aim
+// (mouse). Enemy bullets crossing the ring band inside the arc are
+// reflected back at the enemy: they turn friendly, fly faster and hit
+// harder. Bullets crossing outside the arc pass through, so the shield
+// is a directional defence — aim it at the incoming fire.
+export const SHIELD = {
+  radius: 64,
+  band: 12,
+  arcHalfDeg: 50,
+  reflectMult: 1.5,
+  deflectDamage: 2,
+  deflectScore: 50,
+  shockwaveRadius: 95,
+};
+
+// ── Card draft + synergy (adapted from Gibran's dungeon-crawler design) ──
+// After every cleared wave the player drafts 1 of 3 cards. Each card has
+// a suit (ORBIT / STRIKE / WARD); collecting cards of one suit builds a
+// synergy — the dungeon crawler's "adjacent cards form a synergy" idea,
+// transplanted from map tiles to a run-long draft.
+export const SUITS = {
+  ORBIT: { label: 'ORBIT', color: '#22d3ee' },
+  STRIKE: { label: 'STRIKE', color: '#fb923c' },
+  WARD: { label: 'WARD', color: '#4ade80' },
+};
+
+export const UPGRADES = [
+  { id: 'wider', name: 'Wide Guard', desc: 'Shield arc +25°', glyph: '◐', rarity: 'common', type: 'ORBIT', stack: true },
+  { id: 'hp_up', name: 'Core Armor', desc: 'Max hull +1, restore 1 hull', glyph: '♥', rarity: 'common', type: 'WARD', stack: true },
+  { id: 'dual', name: 'Mirror Guard', desc: 'Second shield arc on the opposite side', glyph: '◑', rarity: 'epic', type: 'ORBIT', stack: false },
+  { id: 'magnet', name: 'Vortex Pull', desc: 'Nearby bullets drift toward your shield', glyph: '◎', rarity: 'rare', type: 'ORBIT', stack: false },
+  { id: 'timeslow', name: 'Time Rift', desc: 'Deflecting slows all enemy bullets', glyph: '◷', rarity: 'epic', type: 'WARD', stack: false },
+  { id: 'chainblast', name: 'Chain Blast', desc: 'Kills explode, hurting nearby enemies', glyph: '✸', rarity: 'rare', type: 'STRIKE', stack: false },
+  { id: 'powreflect', name: 'Power Reflect', desc: 'Deflected bullets 2× faster, +1 damage', glyph: '↯', rarity: 'rare', type: 'STRIKE', stack: false },
+  { id: 'rapidfire', name: 'Counter Burst', desc: 'Deflecting fires 3 homing shots', glyph: '✦', rarity: 'rare', type: 'STRIKE', stack: false },
+  { id: 'absorb', name: 'Energy Absorb', desc: 'Every 5 deflects restores 1 hull', glyph: '⬢', rarity: 'rare', type: 'ORBIT', stack: false },
+  // Fallback filler when the unique pool runs dry: always draftable.
+  { id: 'repair', name: 'Field Repair', desc: 'Restore 1 hull', glyph: '+', rarity: 'common', type: 'WARD', stack: true },
+];
+
+export const RARITY_COLOR = { common: '#6699bb', rare: '#3388ff', epic: '#9933ff' };
+
+// Synergy thresholds: suit count → bonus. Level 2 at two cards of a suit,
+// level 3 at three.
+export const SYNERGY = {
+  ORBIT: {
+    2: 'Reflected bullets deal +1 damage',
+    3: 'Deflecting releases a shockwave',
+  },
+  STRIKE: {
+    2: 'Fire rate +15%',
+    3: 'Bullets pierce +1 enemy',
+  },
+  WARD: {
+    2: 'Pickups magnetize from 2× range',
+    3: 'Hull regenerates +1 every 2 waves',
+  },
+};

@@ -5,6 +5,7 @@
 import { VIEW } from './config.js';
 import { Bullet, Enemy, FloatText, Pickup, burst, mulberry32 } from './entities.js';
 import { STATES } from './main.js';
+import { pick3 } from './world.js';
 
 function placeEnemies(game, specs, rng) {
   for (const [type, x, y] of specs) {
@@ -50,12 +51,15 @@ export function buildShotScene(game, shot, seed) {
     w.combo = 4.5;
     w.comboTimer = 2.4;
     w.waveActive = true;
+    w.spawnQueue = ['drifter', 'spitter', 'splitter', 'weaver', 'drifter', 'spitter', 'drifter', 'weaver', 'splitter', 'drifter'];
     p.x = 380; p.y = 430;
     p.aimX = 760; p.aimY = 300;
     p.angle = Math.atan2(300 - 430, 760 - 380);
+    p.shieldAngle = p.angle;
     p.lives = 3;
     p.spreadUntil = 6;
     p.bombs = 2;
+    p.deflectCount = 7;
     placeEnemies(game, [
       ['drifter', 760, 300], ['drifter', 900, 220], ['spitter', 980, 420],
       ['splitter', 700, 180], ['weaver', 1060, 300], ['drifter', 820, 520],
@@ -78,10 +82,22 @@ export function buildShotScene(game, shot, seed) {
       }
     }
     scatterBullets(game, 980, 420, 3, 240, false);
-    burst(w.particles, 760, 300, '#f472b6', 14, 260);
-    burst(w.particles, 520, 480, '#22d3ee', 10, 200);
-    burst(w.particles, 700, 320, '#fb923c', 26, 380);
-    burst(w.particles, 860, 240, '#4ade80', 16, 300);
+    // BASTION shield in action: teal deflected bullets flying back.
+    const defAim = Math.atan2(300 - 430, 760 - 380);
+    for (const d of [180, 300]) {
+      const db = new Bullet(
+        380 + Math.cos(defAim) * d, 430 + Math.sin(defAim) * d,
+        Math.cos(defAim) * 600, Math.sin(defAim) * 600, true, 2,
+      );
+      db.deflected = true;
+      game.world.bullets.push(db);
+    }
+    p.upgrades = { wider: 1, powreflect: 1 };
+    p.suits = { ORBIT: 1, STRIKE: 1, WARD: 0 };
+    burst(w.particles, 760, 300, '#f472b6', 14, 260, rng);
+    burst(w.particles, 520, 480, '#22d3ee', 10, 200, rng);
+    burst(w.particles, 700, 320, '#fb923c', 26, 380, rng);
+    burst(w.particles, 860, 240, '#4ade80', 16, 300, rng);
     w.pickups.push(new Pickup(560, 250, 'spread'));
     w.pickups.push(new Pickup(1020, 470, 'shield'));
     w.texts.push(new FloatText(760, 270, '+450', '#facc15'));
@@ -98,22 +114,51 @@ export function buildShotScene(game, shot, seed) {
     w.combo = 6.0;
     w.comboTimer = 2.8;
     w.waveActive = true;
+    w.spawnQueue = ['drifter', 'weaver', 'drifter'];
     p.x = 640; p.y = 560;
     p.aimX = 640; p.aimY = 150;
     p.angle = -Math.PI / 2;
+    p.shieldAngle = -Math.PI / 2;
     p.lives = 3;
     p.shield = true;
     p.rapidUntil = 8;
     p.bombs = 1;
+    p.deflectCount = 23;
+    p.upgrades = { wider: 1, dual: 1, powreflect: 1 };
+    p.suits = { ORBIT: 2, STRIKE: 1, WARD: 0 };
     const boss = new Enemy('boss', 640, 150, rng, 5);
     boss.hp = 132; boss.maxHp = 220;
+    // 132/220 = 60% HP is phase 2: set it explicitly (the frozen scene
+    // never runs an update, so the constructor's phase 1 would be wrong).
+    boss.phase = 2; boss.lastPhase = 2;
     w.boss = boss;
     w.enemies.push(boss);
     placeEnemies(game, [['drifter', 300, 260], ['weaver', 980, 280]], rng);
     fireSpread(game, 3);
-    scatterBullets(game, 640, 150, 9, 190, false);
-    burst(w.particles, 640, 220, '#f43f5e', 20, 300);
+    // Deflected bullets racing back up at the Warden.
+    const db1 = new Bullet(640, 420, 0, -600, true, 2); db1.deflected = true; w.bullets.push(db1);
+    const db2 = new Bullet(600, 470, -90, -580, true, 2); db2.deflected = true; w.bullets.push(db2);
+    const db3 = new Bullet(690, 450, 60, -590, true, 2); db3.deflected = true; w.bullets.push(db3);
+    scatterBullets(game, 640, 150, 11, 190, false);
+    burst(w.particles, 640, 220, '#f43f5e', 20, 300, rng);
     w.texts.push(new FloatText(640, 260, '+1,200', '#facc15'));
+    return;
+  }
+
+  if (shot === 'upgrade') {
+    game.state = STATES.UPGRADE;
+    game.best = 48200;
+    w.wave = 4;
+    w.score = 24800;
+    w.kills = 141;
+    w.combo = 5.0;
+    w.comboTimer = 2.0;
+    w.waveActive = false;
+    p.x = 640; p.y = 560;
+    p.lives = 3;
+    p.upgrades = { wider: 1, hp_up: 1 };
+    p.suits = { ORBIT: 1, STRIKE: 0, WARD: 1 };
+    game.upgradeChoices = pick3(p, rng);
     return;
   }
 

@@ -25,6 +25,7 @@ export class Player {
     this.angle = -Math.PI / 2;
     this.radius = PLAYER.radius;
     this.lives = PLAYER.lives;
+    this.maxLives = PLAYER.maxLives;
     this.fireTimer = 0;
     this.invuln = 0;
     this.dashTimer = 0;
@@ -34,9 +35,20 @@ export class Player {
     this.rapidUntil = 0;
     this.bombs = 1;
     this.thrust = 0;
+    // BASTION orbital shield: arc angle follows the aim, arc width grows
+    // with Wide Guard, a second arc appears with Mirror Guard.
+    this.shieldAngle = -Math.PI / 2;
+    this.shieldArcDeg = 50;
+    this.deflectCount = 0;
+    // Card draft: collected upgrade ids (with counts) and per-suit counts
+    // for synergy. { id: count }, { ORBIT: n, STRIKE: n, WARD: n }.
+    this.upgrades = {};
+    this.suits = { ORBIT: 0, STRIKE: 0, WARD: 0 };
+    this.magnetRadius = 140;
   }
   get spread() { return this.spreadUntil > 0; }
   get rapid() { return this.rapidUntil > 0; }
+  has(id) { return (this.upgrades[id] || 0) > 0; }
 }
 
 export class Bullet {
@@ -46,9 +58,29 @@ export class Bullet {
     this.damage = damage;
     this.radius = friendly ? PLAYER.bulletRadius : 6;
     this.dead = false;
+    // BASTION deflect: set when an enemy bullet is reflected by the
+    // orbital shield. Homing: Counter Burst shots steering at a target.
+    this.deflected = false;
+    this.homing = false;
+    this.target = null;
+    this.life = Infinity;
+    this.pierce = 0;
   }
   update(dt) {
+    if (this.homing && this.target && !this.target.dead) {
+      const want = Math.atan2(this.target.y - this.y, this.target.x - this.x);
+      const cur = Math.atan2(this.vy, this.vx);
+      let d = want - cur;
+      while (d > Math.PI) d -= Math.PI * 2;
+      while (d < -Math.PI) d += Math.PI * 2;
+      const turn = Math.max(-6 * dt, Math.min(6 * dt, d));
+      const sp = Math.hypot(this.vx, this.vy) || 520;
+      const a = cur + turn;
+      this.vx = Math.cos(a) * sp;
+      this.vy = Math.sin(a) * sp;
+    }
     this.x += this.vx * dt; this.y += this.vy * dt;
+    if (this.life !== Infinity) { this.life -= dt; if (this.life <= 0) this.dead = true; }
     if (this.x < -30 || this.x > VIEW.W + 30 || this.y < -30 || this.y > VIEW.H + 30) this.dead = true;
   }
 }
@@ -72,6 +104,9 @@ export class Enemy {
     this.vx = 0; this.vy = 0;
     this.dead = false;
     this.flash = 0;
+    // Boss phases (visible system): 1 above 2/3 HP, 2 above 1/3, 3 below.
+    this.phase = 1;
+    this.lastPhase = 1;
   }
   update(dt, player, bullets, rng) {
     this.t += dt;
@@ -108,16 +143,20 @@ export class Enemy {
         break;
       }
       case 'boss': {
+        // Phases: more rings, faster fire as the Warden weakens.
+        const frac = this.hp / this.maxHp;
+        this.phase = frac > 2 / 3 ? 1 : frac > 1 / 3 ? 2 : 3;
+        const ring = this.phase === 1 ? 9 : this.phase === 2 ? 11 : 12;
+        const every = this.phase === 1 ? 0.55 : this.phase === 2 ? 0.45 : 0.38;
         const tx = VIEW.W / 2 + Math.sin(this.t * 0.6) * 320;
         const ty = 150 + Math.sin(this.t * 1.1) * 60;
         this.vx += ((tx - this.x) * 0.8) * dt;
         this.vy += ((ty - this.y) * 0.8) * dt;
         this.shootTimer -= dt;
         if (this.shootTimer <= 0) {
-          this.shootTimer = 0.55;
-          const n = 9;
-          for (let i = 0; i < n; i++) {
-            const a = (i / n) * Math.PI * 2 + this.t;
+          this.shootTimer = every;
+          for (let i = 0; i < ring; i++) {
+            const a = (i / ring) * Math.PI * 2 + this.t;
             bullets.push(new Bullet(this.x, this.y, Math.cos(a) * 190, Math.sin(a) * 190, false));
           }
         }
@@ -126,7 +165,8 @@ export class Enemy {
       default: break;
     }
     const sp = Math.hypot(this.vx, this.vy);
-    const max = this.type === 'boss' ? ENEMIES.boss.speed : this.speed * 1.6;
+    const phaseMult = this.type === 'boss' ? (this.phase === 3 ? 1.5 : this.phase === 2 ? 1.25 : 1) : 1;
+    const max = this.type === 'boss' ? ENEMIES.boss.speed * phaseMult : this.speed * 1.6;
     if (sp > max) { this.vx = (this.vx / sp) * max; this.vy = (this.vy / sp) * max; }
     this.x += this.vx * dt; this.y += this.vy * dt;
     this.x = clamp(this.x, 20, VIEW.W - 20);
@@ -150,11 +190,11 @@ export class Particle {
   }
 }
 
-export function burst(particles, x, y, color, n, speed = 260) {
+export function burst(particles, x, y, color, n, speed = 260, rng) {
   for (let i = 0; i < n; i++) {
-    const a = Math.random() * Math.PI * 2;
-    const s = speed * (0.3 + Math.random() * 0.7);
-    particles.push(new Particle(x, y, Math.cos(a) * s, Math.sin(a) * s, 0.4 + Math.random() * 0.5, 1.5 + Math.random() * 2.5, color));
+    const a = rng() * Math.PI * 2;
+    const s = speed * (0.3 + rng() * 0.7);
+    particles.push(new Particle(x, y, Math.cos(a) * s, Math.sin(a) * s, 0.4 + rng() * 0.5, 1.5 + rng() * 2.5, color));
   }
 }
 
@@ -172,7 +212,8 @@ export class Pickup {
     this.t += dt; this.life -= dt;
     if (this.life <= 0) { this.dead = true; return; }
     const d = Math.hypot(player.x - this.x, player.y - this.y);
-    if (d < 140) {
+    const magnet = player.magnetRadius || 140;
+    if (d < magnet) {
       const a = angleTo(this.x, this.y, player.x, player.y);
       this.vx += Math.cos(a) * 900 * dt; this.vy += Math.sin(a) * 900 * dt;
     }
@@ -182,8 +223,9 @@ export class Pickup {
 }
 
 export class FloatText {
-  constructor(x, y, text, color = COLORS.text) {
+  constructor(x, y, text, color = COLORS.text, size = 15) {
     this.x = x; this.y = y; this.text = text; this.color = color;
+    this.size = size;
     this.life = 0.9; this.dead = false;
   }
   update(dt) { this.y -= 42 * dt; this.life -= dt; if (this.life <= 0) this.dead = true; }

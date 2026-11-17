@@ -2,6 +2,12 @@
 // Every sound is built with the Web Audio API: oscillators and filtered
 // noise, no audio files, no network. Audio starts only after the first
 // user gesture, as browsers require.
+import { mulberry32 } from './entities.js';
+
+// The explosion-noise buffer is generated from a fixed seed so the sound
+// (like everything else in the game) is deterministic per run.
+const noiseRng = mulberry32(99);
+
 let ctx = null;
 let muted = false;
 let musicTimer = null;
@@ -55,7 +61,7 @@ function noise(dur, vol = 0.2, freq = 1200, delay = 0) {
   const len = Math.max(1, Math.floor(c.sampleRate * dur));
   const buf = c.createBuffer(1, len, c.sampleRate);
   const data = buf.getChannelData(0);
-  for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  for (let i = 0; i < len; i++) data[i] = (noiseRng() * 2 - 1) * (1 - i / len);
   const src = c.createBufferSource();
   src.buffer = buf;
   const filter = c.createBiquadFilter();
@@ -90,6 +96,9 @@ export const sfx = {
   boss() { tone(98, 0.4, 'sawtooth', 0.14, 65); tone(147, 0.4, 'sawtooth', 0.1, 98, 0.15); },
   click() { tone(1200, 0.04, 'sine', 0.07); },
   dash() { noise(0.12, 0.1, 2400); },
+  deflect() { tone(1568, 0.09, 'sine', 0.1, 2093); tone(2093, 0.07, 'sine', 0.06, null, 0.04); },
+  upgrade() { [392, 523, 659].forEach((f, i) => tone(f, 0.12, 'triangle', 0.09, null, i * 0.07)); },
+  synergy() { [523, 659, 784, 1047, 1319, 1568].forEach((f, i) => tone(f, 0.14, 'triangle', 0.09, null, i * 0.06)); },
   win() { [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, 0.16, 'triangle', 0.1, null, i * 0.09)); },
   lose() { [392, 330, 262, 196].forEach((f, i) => tone(f, 0.22, 'triangle', 0.1, null, i * 0.14)); },
 };
